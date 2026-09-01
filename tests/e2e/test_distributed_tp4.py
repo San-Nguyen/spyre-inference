@@ -54,12 +54,10 @@ def test_tp4_llm_construction() -> None:
     reason="needs >=4 Spyre cards; skipping TP=4 distributed test",
 )
 def test_tp4_llm_generate_matches_tp1() -> None:
-    """TP=1 vs TP=4 greedy-decode prefix-match test on ibm-ai-platform/micro-g3.3-8b-instruct-1b.
+    """TP=1 vs TP=4 exact token-equality test on ibm-ai-platform/micro-g3.3-8b-instruct-1b.
 
     Runs identical prompts at TP=1 and TP=4 with `temperature=0` and
-    asserts the first 2 output tokens match per prompt. Later divergence
-    is expected from float16 reduction-order differences between the
-    TP=1 and TP=4 paths.
+    asserts every generated token matches across both configurations.
     """
     from vllm import LLM, SamplingParams
 
@@ -83,17 +81,10 @@ def test_tp4_llm_generate_matches_tp1() -> None:
         gc.collect()
         return result
 
-    def _matching_prefix_len(a: list[int], b: list[int]) -> int:
-        for i, (x, y) in enumerate(zip(a, b)):
-            if x != y:
-                return i
-        return min(len(a), len(b))
-
     tp1 = run(tp=1)
     tp4 = run(tp=4)
     for i, (a, b) in enumerate(zip(tp1, tp4)):
-        n = _matching_prefix_len(a, b)
-        assert n >= 2, (
-            f"prompt {i}: tp1 and tp4 diverged at token {n} "
-            f"(expected >=2 matching tokens). tp1={a} tp4={b}"
+        assert a == b, (
+            f"prompt {i}: tp1 and tp4 token sequences differ. "
+            f"tp1={a} tp4={b}"
         )
