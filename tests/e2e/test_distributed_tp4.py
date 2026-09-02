@@ -19,7 +19,6 @@ from __future__ import annotations
 import gc
 
 import pytest
-
 from spyre_testing_plugin.pytest_plugin import spyre_device_count
 
 
@@ -84,7 +83,4 @@ def test_tp4_llm_generate_matches_tp1() -> None:
     tp1 = run(tp=1)
     tp4 = run(tp=4)
     for i, (a, b) in enumerate(zip(tp1, tp4)):
-        assert a == b, (
-            f"prompt {i}: tp1 and tp4 token sequences differ. "
-            f"tp1={a} tp4={b}"
-        )
+        assert a == b, f"prompt {i}: tp1 and tp4 token sequences differ. tp1={a} tp4={b}"
