@@ -123,12 +123,19 @@ endif
 RESULTS_DIR ?= .
 
 .PHONY: help test tests run-one aiu-setup perf-tests coverage print-test-type \
+<<<<<<< HEAD
         test-smoke test-smoke-shard test-quality test-quality-shard \
         test-probes test-probes-shard \
         test-attention test-attention-shard \
         test-distributed test-distributed-shard test-upstream test-upstream-shard \
         test-upstream-distributed \
         tests-single-card tests-multi-card
+=======
+        test-smoke test-smoke-shard test-probes test-probes-shard test-attention test-attention-shard \
+        test-distributed test-distributed-shard test-distributed-tp4 \
+        test-upstream test-upstream-shard \
+        test-upstream-distributed tests-single-card tests-multi-card
+>>>>>>> e267d50 (Added dist. tp4 testing to the ci testing ; change the tp1 and tp4 matching to be at least 2 tokens)
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -289,8 +296,14 @@ test-distributed-shard: ## Run one distributed shard (DIST_SHARDS=N DIST_SHARD_I
 test-distributed-shard-%:
 	$(MAKE) test-distributed-shard DIST_SHARD_ID=$* JUNIT_XML=$(JUNIT_XML)
 
+<<<<<<< HEAD
 # `not gsm8k` carves the GSM8K accuracy gate out of the upstream suite: the gsm8k evals
 # carry the `upstream` marker but belong to the quality suite (test-quality above).
+=======
+test-distributed-tp4: ## Run the TP=4 distributed marker combo (distributed_tp4). Needs 4 cards.
+	$(MAKE) run-one MARK_OVERRIDE='distributed_tp4 and not upstream' JUNIT_XML=$(JUNIT_XML)
+
+>>>>>>> e267d50 (Added dist. tp4 testing to the ci testing ; change the tp1 and tp4 matching to be at least 2 tokens)
 test-upstream: ## Run the upstream (non-distributed) marker combo, unsharded (local full run).
 	$(MAKE) run-one MARK_OVERRIDE='upstream and not distributed and not gsm8k' JUNIT_XML=$(JUNIT_XML)
 
@@ -345,6 +358,7 @@ tests-multi-card: ## Run the 2-card marker combos (distributed shards/upstream-d
 	for i in $$(seq 0 $$(( $(PROBE_SHARDS) - 1 ))); do \
 	  mkdir -p "$(RESULTS_DIR)/junit-test-probes-shard-$$i" && $(MAKE) test-probes-shard PROBE_SHARD_ID=$$i JUNIT_XML="$(RESULTS_DIR)/junit-test-probes-shard-$$i/junit-test-probes-shard-$$i.xml" || rc=1; \
 	done; \
+	mkdir -p "$(RESULTS_DIR)/junit-test-distributed-tp4" && $(MAKE) test-distributed-tp4 JUNIT_XML="$(RESULTS_DIR)/junit-test-distributed-tp4/junit-test-distributed-tp4.xml" || rc=1; \
 	exit $$rc
 
 # When MARK_OVERRIDE is unset and TEST_TYPE=regression (or trunk, same
