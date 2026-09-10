@@ -20,7 +20,6 @@ import gc
 import os
 
 import pytest
-
 from spyre_testing_plugin.vfio_reaper import wait_until_card_free
 
 
