@@ -103,10 +103,15 @@ else ifeq ($(TEST_TYPE),integration)
 # Single-invocation integration = the CI smoke suite, which now also carries the
 # compiled (enforce_eager=False) tests/e2e/test_compile.py cases. Probes are
 # excluded here just as the sharded smoke jobs exclude them (they run in their
+<<<<<<< HEAD
 # own test-probes job and must not gate integration on strict-xfail flips), and
 # the model-quality gate likewise has its own job: every case compiles a product
 # model, up to the 31B decoders.
 MARK_EXPR := -m "not (distributed or upstream or attention or probe or model_quality)"
+=======
+# own test-probes job and must not gate integration on strict-xfail flips).
+MARK_EXPR := -m "not (distributed or distributed_tp4 or upstream or attention or probe)"
+>>>>>>> f945ed5 (Fix signoff for DCO; a fix to remove the test to tp1 suite)
 else ifeq ($(TEST_TYPE),unit)
 # model_quality is scheduled regression/trunk only (_test_matrix.yaml), so it stays
 # out of the unit tier as well.
@@ -185,8 +190,13 @@ run-one: ## Internal: one pytest invocation for the resolved MARK_EXPR/JUNIT_ARG
 	echo "Running tests for TEST_TYPE=$(TEST_TYPE) MARK_OVERRIDE=$(MARK_OVERRIDE)..."; \
 	$(OMP_ENV) $(COVERAGE_ENV) uv run --active --no-sync pytest $(PYTEST_ARGS) $(MARK_EXPR) $(UPSTREAM_ARG) $(JUNIT_ARGS)
 
+<<<<<<< HEAD
 test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-attention, non-probe, non-model-quality). Carries the compiled e2e cases.
 	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention or probe or model_quality)' JUNIT_XML=$(JUNIT_XML)
+=======
+test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-attention, non-probe). Carries the compiled e2e cases.
+	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe)' JUNIT_XML=$(JUNIT_XML)
+>>>>>>> f945ed5 (Fix signoff for DCO; a fix to remove the test to tp1 suite)
 
 # The smoke suite is dominated by a handful of e2e model tests (including the
 # compiled enforce_eager=False cases in tests/e2e/test_compile.py), so CI fans it
@@ -197,7 +207,11 @@ test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-at
 SMOKE_SHARDS ?= 8
 SMOKE_SHARD_ID ?= 0
 test-smoke-shard: ## Run one smoke shard (SMOKE_SHARDS=N SMOKE_SHARD_ID=i).
+<<<<<<< HEAD
 	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention or probe or model_quality)' \
+=======
+	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe)' \
+>>>>>>> f945ed5 (Fix signoff for DCO; a fix to remove the test to tp1 suite)
 	  PYTEST_ARGS='$(PYTEST_ARGS) --smoke-shards=$(SMOKE_SHARDS) --smoke-shard-id=$(SMOKE_SHARD_ID)' \
 	  JUNIT_XML=$(JUNIT_XML)
 
