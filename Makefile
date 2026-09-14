@@ -104,7 +104,7 @@ else ifeq ($(TEST_TYPE),integration)
 # compiled (enforce_eager=False) tests/e2e/test_compile.py cases. Probes are
 # excluded here just as the sharded smoke jobs exclude them (they run in their
 # own test-probes job and must not gate integration on strict-xfail flips).
-MARK_EXPR := -m "not (distributed or upstream or attention or probe)"
+MARK_EXPR := -m "not (distributed or distributed_tp4 or upstream or attention or probe)"
 else ifeq ($(TEST_TYPE),unit)
 MARK_EXPR := -m "not upstream"
 else
@@ -173,7 +173,7 @@ run-one: ## Internal: one pytest invocation for the resolved MARK_EXPR/JUNIT_ARG
 	$(OMP_ENV) $(COVERAGE_ENV) uv run --active --no-sync pytest $(PYTEST_ARGS) $(MARK_EXPR) $(UPSTREAM_ARG) $(JUNIT_ARGS)
 
 test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-attention, non-probe). Carries the compiled e2e cases.
-	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention or probe)' JUNIT_XML=$(JUNIT_XML)
+	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe)' JUNIT_XML=$(JUNIT_XML)
 
 # The smoke suite is dominated by a handful of e2e model tests (including the
 # compiled enforce_eager=False cases in tests/e2e/test_compile.py), so CI fans it
@@ -184,7 +184,7 @@ test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-at
 SMOKE_SHARDS ?= 8
 SMOKE_SHARD_ID ?= 0
 test-smoke-shard: ## Run one smoke shard (SMOKE_SHARDS=N SMOKE_SHARD_ID=i).
-	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention or probe)' \
+	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe)' \
 	  PYTEST_ARGS='$(PYTEST_ARGS) --smoke-shards=$(SMOKE_SHARDS) --smoke-shard-id=$(SMOKE_SHARD_ID)' \
 	  JUNIT_XML=$(JUNIT_XML)
 
