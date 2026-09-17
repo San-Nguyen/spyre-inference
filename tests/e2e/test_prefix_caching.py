@@ -105,9 +105,7 @@ def _make_llm(*, enable_prefix_caching: bool, enforce_eager: bool) -> LLM:
 # partial-prefix query/KV lengths that APC generates.
 @pytest.mark.uses_subprocess
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "compiled"])
-def test_prefix_caching_output_matches_no_caching(
-    enforce_eager: bool, shared_prefix: str
-) -> None:
+def test_prefix_caching_output_matches_no_caching(enforce_eager: bool, shared_prefix: str) -> None:
     """Prefix-caching must not change the generated tokens.
 
     Runs the same prompts on two separate engines — APC enabled (cold) and
