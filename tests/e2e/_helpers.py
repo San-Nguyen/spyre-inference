@@ -33,9 +33,8 @@ def generate(
     The post-shutdown assertion sits outside the ``finally`` block so a
     generate failure does not mask the device-release failure's own traceback.
     """
-    from vllm import LLM, SamplingParams
-
     from spyre_testing_plugin.vfio_reaper import wait_until_card_free
+    from vllm import LLM, SamplingParams
 
     llm = LLM(
         model=model,
