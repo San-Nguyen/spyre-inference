@@ -35,8 +35,7 @@ def _assert_matches_tp1(tp1: list[list[int]], tp4: list[list[int]]) -> None:
     Later divergence is expected: fp16 reduction order differs across shards.
     """
     assert len(tp1) == len(tp4), (
-        f"prompt count mismatch: tp1 returned {len(tp1)} sequences, "
-        f"tp4 returned {len(tp4)}"
+        f"prompt count mismatch: tp1 returned {len(tp1)} sequences, tp4 returned {len(tp4)}"
     )
 
     def prefix_len(a: list[int], b: list[int]) -> int:
