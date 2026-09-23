@@ -103,19 +103,14 @@ else ifeq ($(TEST_TYPE),integration)
 # Single-invocation integration = the CI smoke suite, which now also carries the
 # compiled (enforce_eager=False) tests/e2e/test_compile.py cases. Probes are
 # excluded here just as the sharded smoke jobs exclude them (they run in their
-<<<<<<< HEAD
 # own test-probes job and must not gate integration on strict-xfail flips), and
 # the model-quality gate likewise has its own job: every case compiles a product
 # model, up to the 31B decoders.
-MARK_EXPR := -m "not (distributed or upstream or attention or probe or model_quality)"
-=======
-# own test-probes job and must not gate integration on strict-xfail flips).
-MARK_EXPR := -m "not (distributed or distributed_tp4 or upstream or attention or probe)"
->>>>>>> f945ed5 (Fix signoff for DCO; a fix to remove the test to tp1 suite)
+MARK_EXPR := -m "not (distributed or distributed_tp4 or upstream or attention or probe or model_quality)"
 else ifeq ($(TEST_TYPE),unit)
 # model_quality is scheduled regression/trunk only (_test_matrix.yaml), so it stays
-# out of the unit tier as well.
-MARK_EXPR := -m "not (upstream or model_quality)"
+# out of the unit tier as well. distributed_tp4 has its own 4-card job.
+MARK_EXPR := -m "not (upstream or model_quality or distributed_tp4)"
 else
 # The validation above already rejected any type outside VALID_TEST_TYPES, so
 # a value that reaches here IS valid but has no marker mapping above -- i.e. a
@@ -128,19 +123,13 @@ endif
 RESULTS_DIR ?= .
 
 .PHONY: help test tests run-one aiu-setup perf-tests coverage print-test-type \
-<<<<<<< HEAD
         test-smoke test-smoke-shard test-quality test-quality-shard \
         test-probes test-probes-shard \
         test-attention test-attention-shard \
-        test-distributed test-distributed-shard test-upstream test-upstream-shard \
-        test-upstream-distributed \
-        tests-single-card tests-multi-card
-=======
-        test-smoke test-smoke-shard test-probes test-probes-shard test-attention test-attention-shard \
         test-distributed test-distributed-shard test-distributed-tp4 \
         test-upstream test-upstream-shard \
-        test-upstream-distributed tests-single-card tests-multi-card
->>>>>>> e267d50 (Added dist. tp4 testing to the ci testing ; change the tp1 and tp4 matching to be at least 2 tokens)
+        test-upstream-distributed \
+        tests-single-card tests-multi-card
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -190,13 +179,8 @@ run-one: ## Internal: one pytest invocation for the resolved MARK_EXPR/JUNIT_ARG
 	echo "Running tests for TEST_TYPE=$(TEST_TYPE) MARK_OVERRIDE=$(MARK_OVERRIDE)..."; \
 	$(OMP_ENV) $(COVERAGE_ENV) uv run --active --no-sync pytest $(PYTEST_ARGS) $(MARK_EXPR) $(UPSTREAM_ARG) $(JUNIT_ARGS)
 
-<<<<<<< HEAD
 test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-attention, non-probe, non-model-quality). Carries the compiled e2e cases.
-	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention or probe or model_quality)' JUNIT_XML=$(JUNIT_XML)
-=======
-test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-attention, non-probe). Carries the compiled e2e cases.
-	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe)' JUNIT_XML=$(JUNIT_XML)
->>>>>>> f945ed5 (Fix signoff for DCO; a fix to remove the test to tp1 suite)
+	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe or model_quality)' JUNIT_XML=$(JUNIT_XML)
 
 # The smoke suite is dominated by a handful of e2e model tests (including the
 # compiled enforce_eager=False cases in tests/e2e/test_compile.py), so CI fans it
@@ -207,11 +191,7 @@ test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-at
 SMOKE_SHARDS ?= 8
 SMOKE_SHARD_ID ?= 0
 test-smoke-shard: ## Run one smoke shard (SMOKE_SHARDS=N SMOKE_SHARD_ID=i).
-<<<<<<< HEAD
-	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention or probe or model_quality)' \
-=======
-	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe)' \
->>>>>>> f945ed5 (Fix signoff for DCO; a fix to remove the test to tp1 suite)
+	$(MAKE) run-one MARK_OVERRIDE='not (distributed or distributed_tp4 or upstream or attention or probe or model_quality)' \
 	  PYTEST_ARGS='$(PYTEST_ARGS) --smoke-shards=$(SMOKE_SHARDS) --smoke-shard-id=$(SMOKE_SHARD_ID)' \
 	  JUNIT_XML=$(JUNIT_XML)
 
@@ -310,14 +290,11 @@ test-distributed-shard: ## Run one distributed shard (DIST_SHARDS=N DIST_SHARD_I
 test-distributed-shard-%:
 	$(MAKE) test-distributed-shard DIST_SHARD_ID=$* JUNIT_XML=$(JUNIT_XML)
 
-<<<<<<< HEAD
-# `not gsm8k` carves the GSM8K accuracy gate out of the upstream suite: the gsm8k evals
-# carry the `upstream` marker but belong to the quality suite (test-quality above).
-=======
 test-distributed-tp4: ## Run the TP=4 distributed marker combo (distributed_tp4). Needs 4 cards.
 	$(MAKE) run-one MARK_OVERRIDE='distributed_tp4 and not upstream' JUNIT_XML=$(JUNIT_XML)
 
->>>>>>> e267d50 (Added dist. tp4 testing to the ci testing ; change the tp1 and tp4 matching to be at least 2 tokens)
+# `not gsm8k` carves the GSM8K accuracy gate out of the upstream suite: the gsm8k evals
+# carry the `upstream` marker but belong to the quality suite (test-quality above).
 test-upstream: ## Run the upstream (non-distributed) marker combo, unsharded (local full run).
 	$(MAKE) run-one MARK_OVERRIDE='upstream and not distributed and not gsm8k' JUNIT_XML=$(JUNIT_XML)
 

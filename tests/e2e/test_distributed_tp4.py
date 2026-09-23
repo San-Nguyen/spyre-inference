@@ -16,10 +16,17 @@
 
 from __future__ import annotations
 
+import importlib.util
+import pathlib
+
 import pytest
 from spyre_testing_plugin.pytest_plugin import spyre_device_count
 
-from tests.e2e._helpers import generate as _generate
+_helpers_path = pathlib.Path(__file__).parent / "_helpers.py"
+_spec = importlib.util.spec_from_file_location("_e2e_helpers", _helpers_path)
+_helpers = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
+_spec.loader.exec_module(_helpers)  # type: ignore[union-attr]
+_generate = _helpers.generate
 
 
 def _assert_matches_tp1(tp1: list[list[int]], tp4: list[list[int]]) -> None:

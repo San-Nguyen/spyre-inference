@@ -25,6 +25,7 @@ def generate(
     tp: int,
     enforce_eager: bool,
     compilation_config: dict | None = None,
+    hf_overrides=None,
 ) -> list[list[int]]:
     """Run vllm.LLM.generate and return per-prompt token-id lists.
 
@@ -44,6 +45,7 @@ def generate(
         max_model_len=128,
         max_num_seqs=2,
         **({"compilation_config": compilation_config} if compilation_config is not None else {}),
+        **({"hf_overrides": hf_overrides} if hf_overrides is not None else {}),
     )
     try:
         outs = llm.generate(
