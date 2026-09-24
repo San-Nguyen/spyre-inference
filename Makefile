@@ -339,7 +339,7 @@ tests-single-card: ## Run the 1-card marker combos (smoke shards / quality shard
 	done; \
 	exit $$rc
 
-tests-multi-card: ## Run the 2-card marker combos (distributed shards/upstream-distributed/probes). Needs 2 cards.
+tests-multi-card: ## Run the multi-card marker combos (distributed shards/upstream-distributed/probes/tp4). Needs 2 cards minimum; TP=4 tests skip gracefully on hosts with fewer than 4 cards.
 	mkdir -p "$(RESULTS_DIR)"; \
 	rc=0; \
 	for i in $$(seq 0 $$(( $(DIST_SHARDS) - 1 ))); do \
@@ -349,6 +349,7 @@ tests-multi-card: ## Run the 2-card marker combos (distributed shards/upstream-d
 	for i in $$(seq 0 $$(( $(PROBE_SHARDS) - 1 ))); do \
 	  mkdir -p "$(RESULTS_DIR)/junit-test-probes-shard-$$i" && $(MAKE) test-probes-shard PROBE_SHARD_ID=$$i JUNIT_XML="$(RESULTS_DIR)/junit-test-probes-shard-$$i/junit-test-probes-shard-$$i.xml" || rc=1; \
 	done; \
+	mkdir -p "$(RESULTS_DIR)/junit-test-distributed-tp4" && $(MAKE) test-distributed-tp4 JUNIT_XML="$(RESULTS_DIR)/junit-test-distributed-tp4/junit-test-distributed-tp4.xml" || rc=1; \
 	exit $$rc
 
 # When MARK_OVERRIDE is unset and TEST_TYPE=regression (or trunk, same
