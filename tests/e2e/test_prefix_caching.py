@@ -150,8 +150,11 @@ def test_prefix_cache_hit_reported_after_warmup(shared_prefix: str) -> None:
     sp = SamplingParams(temperature=0.0, max_tokens=16)
 
     llm = _make_llm(enable_prefix_caching=True, enforce_eager=True)
-    # Prime the cache with the shared prefix.
-    llm.generate(prompts[0], sp, use_tqdm=False)
+    # Prime the cache with a throwaway prompt that contains the shared prefix
+    # but is not one of the measured prompts.  This warms the prefix blocks
+    # without making either measured prompt cache-served on the priming pass
+    # itself, so the measured batch is the first time these exact prompts run.
+    llm.generate(shared_prefix + "Warmup.", sp, use_tqdm=False)
     outputs = llm.generate(prompts, sp, use_tqdm=False)
     del llm
 
