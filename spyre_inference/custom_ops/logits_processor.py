@@ -13,10 +13,13 @@
 # limitations under the License.
 
 import torch
-from vllm.distributed import tensor_model_parallel_all_gather
+import torch.distributed as dist
+from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
-from .lazy_compile import CompileOutermost, compile_when_outermost
+from spyre_inference import envs
+
+from .lazy_compile import CompileOutermost, maybe_compile
 from .utils import convert
 from .vocab_parallel_embedding import promote_tied_lm_head
 
@@ -26,8 +29,8 @@ class SpyreLogitsProcessor(CompileOutermost, LogitsProcessor):
     def _apply_head(self, lm_head, hidden_states, embedding_bias=None):
         """Project through the lm_head, then D2H the logits on the single-card path.
 
-        SpyreParallelLMHead.forward_oot returns logits on Spyre so the TP
-        all_gather in ``_gather_logits`` (which also D2Hs) can run on-device.
+        The head's ``SpyreUnquantizedLMHeadMethod.apply`` returns logits on Spyre so the
+        TP all_gather in ``_gather_logits`` (which also D2Hs) can run on-device.
         Upstream only calls ``_gather_logits`` when ``tp_size > 1``, so with a
         single card the logits would otherwise stay on Spyre and the sampler's
         ``logits.to(torch.float32)`` crashes torch-spyre's ``copy_from_d2d``.
@@ -42,11 +45,23 @@ class SpyreLogitsProcessor(CompileOutermost, LogitsProcessor):
             logits = convert(logits, device="cpu")
         return logits
 
-    @compile_when_outermost
+    @maybe_compile
     def _all_gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_gather(logits)
 
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
         # `Platform.use_all_gather()` is constant-True on Spyre, so the gather is always the
         # all-gather form; compiled it lowers to `spyre::all_gather_async`, then D2H for sampling.
+        if envs.SPYRE_LOGITS_CPU_GATHER:
+            return self._cpu_all_gather_logits(logits)
         return convert(self._all_gather_logits(logits), device="cpu")
+
+    @staticmethod
+    def _cpu_all_gather_logits(logits: torch.Tensor) -> torch.Tensor:
+        # The device-to-host copy converts every fp16 element on the host, so copying one
+        # vocab shard per rank is cheaper than a full-vocab copy on every rank.
+        tp = get_tp_group()
+        shard = convert(logits, device="cpu").contiguous()
+        shards = [torch.empty_like(shard) for _ in range(tp.world_size)]
+        dist.all_gather(shards, shard, group=tp.cpu_group)  # ty: ignore[possibly-missing-attribute]
+        return torch.cat(shards, dim=-1)

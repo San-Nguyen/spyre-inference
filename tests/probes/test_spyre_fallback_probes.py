@@ -12,22 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Strict-xfail probes for torch-spyre primitives blocking CPU fallbacks.
+"""Probes for torch-spyre primitives blocking CPU fallbacks.
 
 Each test exercises a single primitive that spyre-inference needs on-device
-(decoder forward, encoder pack, pooling). They are intentionally strict
-xfail: when a primitive starts working in torch-spyre, the corresponding
-probe flips to XPASS and we can remove the associated workaround here.
-
-Section 10 applies the same idea to workarounds for upstream vLLM bugs: those
-probes need no device and inspect vLLM instead.
+(decoder forward, encoder pack, pooling). Strict xfails flag newly working
+primitives so their workarounds can be removed. The one-row matmul timing probe
+is non-strict: an XPASS calls for remeasurement before removing its workaround.
 
 All device tests run against the real Spyre device when available; otherwise
 they skip silently (the same pattern used by attention/test_spyre_attn.py).
 """
-
-import inspect
-import re
 
 import pytest
 import torch
@@ -307,8 +301,8 @@ def test_spyre_indirect_matmul_tensor_index(spyre_device):
     Was xfail(strict=True) for diverging from CPU silently; fixed in the torch-spyre
     f4f0bcc..9f975a3 range. The kernels still pass a one-element index, for unrelated
     reasons still probed by test_spyre_indirect_page_gather_subscript_needs_compile
-    (int32 index upcast under aten.index) and test_spyre_compile_input_honors_storage_offset
-    (torch-spyre#3770).
+    (int32 index upcast under aten.index) and test_spyre_scatter_index_row_of_2d_table
+    (torch-spyre#3851).
     """
     num_kv_heads = 2
     block_size = 64
@@ -627,29 +621,14 @@ def test_spyre_scatter_from_prefix_view_source(spyre_device, source):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "dtype",
-    [
-        torch.float16,
-        pytest.param(
-            torch.int32,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "torch-spyre#3770: an int32 device view with storage_offset != 0 is "
-                    "read from offset 0 when passed into a compiled region. Index tensors "
-                    "are int32, hence the per-sequence page_index_tables."
-                ),
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.int32])
 def test_spyre_compile_input_honors_storage_offset(spyre_device, dtype):
     """A compiled kernel must read a device input from its own storage offset.
 
     These views are is_contiguous(), so .contiguous() is a no-op; only a real copy works.
     Every offset here is a whole number of sticks, so a pass does not speak for a
-    row-misaligned view.
+    row-misaligned view. For int32 this covers an elementwise read only, not an index
+    (test_spyre_scatter_index_row_of_2d_table).
     """
     rows, width = 4, 64
     base_cpu = torch.stack([torch.full((rows, width), float(s)) for s in range(3)]).to(dtype)
@@ -685,9 +664,9 @@ def test_spyre_compile_input_honors_row_offset_off_stick(spyre_device):
     """A row view whose width is not a whole number of sticks.
 
     test_spyre_compile_input_honors_storage_offset slices rows that are a whole number of
-    sticks wide, so its offsets are stick multiples. ``_rows_start_on_sticks`` in the MoE
-    gates the per-token row clones on exactly that property, so the off-stick width is the
-    case that decides whether the gate can go.
+    sticks wide, so its offsets are stick multiples. ``_rows_are_stick_addressable`` in the MoE
+    gates the per-token row clones on the same property, so an off-stick row stride is the case
+    that decides whether the gate can go.
     """
     rows, width = 2, 40
     assert (rows * width) % _FP16_ELEMS_PER_STICK != 0, "row stride must not be a stick multiple"
@@ -740,6 +719,241 @@ def test_spyre_compile_input_honors_last_dim_window(spyre_device, start):
     view, view_cpu = base[:, start : start + window], base_cpu[:, start : start + window]
     assert not view.is_contiguous() and view.storage_offset() == start
     torch.testing.assert_close(fn(view).cpu(), view_cpu + view_cpu, atol=0, rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# 8c. storage_offset is a graph guard, so a varying one is a recompile axis
+# ---------------------------------------------------------------------------
+
+
+def test_spyre_compile_input_offset_specialises_the_graph(spyre_device):
+    """One compiled variant per distinct storage_offset.
+
+    torch-spyre#4449 fixed the silent offset-0 read of torch-spyre#3770 with a Dynamo
+    guard on the offset (``_monkey_patch.py``), not a runtime read, so a caller whose
+    offset varies recompiles. This is what keeps the paged-attention query rows gathered.
+    """
+    rows, width = 4, 64
+    base = torch.stack([torch.full((rows, width), float(s)) for s in range(3)])
+    base = base.to(torch.float16).to(spyre_device)
+
+    @torch.compile(dynamic=False)
+    def fn(x):
+        return x + x
+
+    code = fn._torchdynamo_orig_callable.__code__  # ty: ignore[unresolved-attribute]
+    for s in range(3):
+        fn(base[s])
+    entries = torch._dynamo.eval_frame._debug_get_cache_entry_list(code)
+    assert len(entries) == 3, (
+        f"expected one compiled variant per storage offset, got {len(entries)}; if this "
+        "is now 1, torch-spyre reads the offset at runtime and a slice is free to "
+        "replace a gather"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8d. Slicing a stacked input INSIDE the graph, the other way to avoid offsets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("query_len", [1, 64])
+def test_spyre_in_graph_slice_of_stacked_fp16_input(spyre_device, query_len):
+    """One stacked mask sliced per block in-graph, the form the mask mirror uses.
+
+    No offset reaches a guard, unlike a sliced graph input.
+    """
+    blocks, block_size = 8, 128
+    stack_cpu = torch.stack(
+        [torch.full((query_len, block_size), float(b)) for b in range(blocks)]
+    ).to(torch.float16)
+    stack = stack_cpu.to(spyre_device)
+
+    @torch.compile(dynamic=False)
+    def fn(s):
+        acc = s[0] * 2.0
+        for i in range(1, blocks):
+            acc = acc + s[i] * 2.0
+        return acc
+
+    expected = sum(stack_cpu[b] * 2.0 for b in range(blocks))
+    torch.testing.assert_close(fn(stack).cpu(), expected, atol=0, rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# 8e. The transfer collapses a host view's offset, which is what 8d relies on
+# ---------------------------------------------------------------------------
+
+
+def test_spyre_transfer_lands_a_host_view_at_offset_zero(spyre_device):
+    """A nonzero-offset host view arrives on device contiguous at offset 0.
+
+    The mask mirror hands over exactly this: the width-1 builder path assigns a row of
+    a per-group tensor, so the host stack starts mid-storage. If the transfer preserved
+    that offset, every consumer that narrows dim 0 in-graph (8d, and a tiled page walk)
+    would instead be slicing a graph input at a varying offset -- one compiled variant
+    per sequence at best (8c), wrong rows for int32 at worst (8).
+    """
+    rows, blocks, block_size = 4, 8, 128
+    # Bounded like `_stacked_index_pages`: the compare is exact, so a value and its double
+    # both have to be representable in fp16. Still unique per (row, block) and varying
+    # inside a tile, so a misread row, block or element each show up.
+    base = (
+        torch.arange(rows).reshape(rows, 1, 1, 1) * 32
+        + torch.arange(blocks).reshape(1, blocks, 1, 1) * 4
+        + torch.arange(block_size).reshape(1, 1, 1, block_size) % 4
+    ).to(torch.float16)
+
+    @torch.compile(dynamic=False)
+    def fn(s, i):
+        return s[i] * 2.0
+
+    for row in range(1, rows):
+        view = base[row][: blocks - 3]
+        assert view.is_contiguous() and view.storage_offset() > 0
+        stack = view.to(spyre_device)
+        assert stack.is_contiguous() and stack.storage_offset() == 0
+        for i in (0, blocks - 4):
+            torch.testing.assert_close(fn(stack, i).cpu(), view[i] * 2.0, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("query_len", [1, 64])
+def test_spyre_for_each_tile_consumes_transferred_mask_stack(spyre_device, dtype, query_len):
+    """The tiled attention mask layout survives transfer, broadcast, and reduction."""
+    from torch_spyre._inductor.wsr import for_each_tile
+
+    rows, blocks, kv_heads, qpk, block_size = 3, 4, 2, 2, 128
+    base = torch.zeros(rows, blocks, query_len, block_size, dtype=dtype)
+    for b in range(blocks):
+        base[:, b] = b / 8
+    host_view = base[1]
+    assert host_view.storage_offset() > 0
+    stack = host_view.to(spyre_device)
+    assert stack.storage_offset() == 0
+
+    @torch.compile(dynamic=False, fullgraph=True)
+    def fn(mask_stack):
+        scores = mask_stack.new_zeros(kv_heads, qpk, query_len, block_size)
+        init = mask_stack.new_zeros(kv_heads, qpk, query_len)
+
+        def body(total, operands):
+            (mask_tile,) = operands
+            probs = torch.exp(scores + mask_tile[0])
+            return total + probs.sum(dim=-1), None
+
+        total, _ = for_each_tile(
+            body,
+            (mask_stack,),
+            dims=(0,),
+            tile_size=1,
+            init=init,
+        )
+        return total
+
+    expected = sum(
+        torch.exp(host_view[b]).sum(dim=-1).expand(kv_heads, qpk, query_len) for b in range(blocks)
+    )
+    torch.testing.assert_close(fn(stack).cpu(), expected, atol=0.02, rtol=0.02)
+
+
+def _stacked_index_pages(blocks, entries, block_size, head_size, spyre_device):
+    pages_cpu = (torch.arange(blocks * entries * block_size * head_size) % 97).reshape(
+        blocks * entries, block_size, head_size
+    )
+    pages_cpu = pages_cpu.to(torch.float16)
+    return pages_cpu, pages_cpu.to(spyre_device)
+
+
+def test_spyre_in_graph_slice_of_stacked_page_index(spyre_device):
+    """One stacked [num_blocks, 1] int32 table, sliced in-graph, feeding index_select.
+
+    An index that is a row of a 2-D table argument loses all but its first stick
+    (test_spyre_scatter_index_row_of_2d_table); an in-graph slice of a
+    stacked table is a different mechanism and holds at this shape, which is what
+    ``page_attn_head_major_prefill`` reads.
+    """
+    blocks, block_size, head_size = 4, 64, 64
+    pages_cpu, pages = _stacked_index_pages(blocks, 1, block_size, head_size, spyre_device)
+    table_cpu = torch.arange(blocks, dtype=torch.int32).reshape(blocks, 1)
+    table = table_cpu.to(spyre_device)
+
+    @torch.compile(dynamic=False)
+    def fn(p, t):
+        acc = p.index_select(0, t[0])
+        for i in range(1, blocks):
+            acc = acc + p.index_select(0, t[i])
+        return acc
+
+    expected = sum(pages_cpu.index_select(0, table_cpu[b].to(torch.int64)) for b in range(blocks))
+    torch.testing.assert_close(fn(pages, table).cpu(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "An in-graph row slice of a stacked [num_blocks, KV, 1] int32 table gathers the "
+        "wrong rows -- silently, with no compile error. The [num_blocks, 1] form above "
+        "works, so the head-major kv_index_tables cannot be collapsed into one transfer "
+        "the way its page indices can."
+    ),
+)
+def test_spyre_in_graph_slice_of_stacked_kv_row_index(spyre_device):
+    """The same idea at the [KV, 1] entry shape ``page_attn_head_major`` gathers with.
+
+    A 2-D entry cannot go through index_select, hence the subscript.
+    """
+    blocks, kv, block_size, head_size = 4, 8, 64, 64
+    pages_cpu, pages = _stacked_index_pages(blocks, kv, block_size, head_size, spyre_device)
+    rows = torch.arange(kv, dtype=torch.int32).reshape(kv, 1)
+    table_cpu = torch.stack([b * kv + rows for b in range(blocks)])
+    table = table_cpu.to(spyre_device)
+
+    @torch.compile(dynamic=False)
+    def fn(p, t):
+        acc = p[t[0]].reshape(kv, block_size, head_size)
+        for i in range(1, blocks):
+            acc = acc + p[t[i]].reshape(kv, block_size, head_size)
+        return acc
+
+    expected = sum(
+        pages_cpu[table_cpu[b].to(torch.int64)].reshape(kv, block_size, head_size)
+        for b in range(blocks)
+    )
+    torch.testing.assert_close(fn(pages, table).cpu(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "torch-spyre#3851: an index that is a row of a 2-D table is followed for its first "
+        "int32 stick only; the entries past it are dropped, silently. Offset 0 fails too."
+    ),
+)
+def test_spyre_scatter_index_row_of_2d_table(spyre_device):
+    """index_copy_ with row 0 of a [2, 64] table, the form a [KV, T] head-major write index takes.
+
+    When this XPASS-es, SpyreHeadMajorAttentionImpl.kv_write_index can upload one [KV, T]
+    tensor and hand the store its rows, instead of one allocation and H2D copy per KV head.
+    """
+    rows, entries, width = 128, 64, 128
+    table_cpu = torch.stack([torch.arange(entries) * 2, torch.arange(entries) * 2 + 1])
+    table = table_cpu.to(spyre_device)
+    source_cpu = (1 + torch.arange(entries, dtype=torch.float16)).unsqueeze(1).expand(-1, width)
+    source = source_cpu.contiguous().to(spyre_device)
+    out = torch.zeros(rows, width, dtype=torch.float16).to(spyre_device)
+
+    @torch.compile(dynamic=False)
+    def fn(o, i, s):
+        o.index_copy_(0, i, s)
+
+    index = table[0]
+    assert index.storage_offset() == 0
+    fn(out, index, source)
+    expected = torch.zeros(rows, width, dtype=torch.float16).index_copy_(
+        0, table_cpu[0], source_cpu
+    )
+    torch.testing.assert_close(out.cpu(), expected, atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
@@ -924,16 +1138,14 @@ def test_spyre_fp32_reduce_d2h_with_destagger(spyre_device):
 # ---------------------------------------------------------------------------
 #
 # torch-spyre SPYRE_FP32_OPS includes add/mul/sum/mean but not batchmatmul
-# (torch-spyre#1794), so F.linear on float32 classifier / reranker heads
-# stays on CPU (configure_pooling_for_spyre). When this XPASS-es, drop that
-# fallback.
+# (torch-spyre#1794). Heads downcast to fp16 (#868); this probe tracks native
+# fp32 linear.
 
 
 _FP32_BMM_REASON = (
     "torch-spyre has FP32 for add/mul/sum/mean (SPYRE_FP32_OPS) but not for "
-    "batchmatmul / F.linear (torch-spyre#1794). Pooling classifier heads stay "
-    "float32, so configure_pooling_for_spyre keeps them on CPU. When this "
-    "XPASS-es, drop the FP32-head CPU fallback in configure_pooling_for_spyre."
+    "batchmatmul / F.linear (torch-spyre#1794). Classifier heads downcast to "
+    "fp16 instead. When this XPASS-es, native fp32 linear is available."
 )
 
 
@@ -961,52 +1173,18 @@ def test_spyre_fp32_linear_for_pooling_heads(spyre_device, mode):
 
 
 # ---------------------------------------------------------------------------
-# 12. Upstream vLLM workarounds (no device needed)
+# 12. Short-row matmul scheduling
 # ---------------------------------------------------------------------------
 
 
+# Non-strict: a wall-clock ratio varies by CI host, so an XPASS reports rather than fails.
 @pytest.mark.xfail(
-    strict=True,
+    strict=False,
     reason=(
-        "Gemma4SelfDecoderLayers re-stores four scalar buffers owned by "
-        "Gemma4Model as plain attributes, so model.to('spyre') leaves them on "
-        "CPU and the compiled embed_input_ids gets a 0-d CPU graph input. "
-        "Fixed upstream by vllm-project/vllm#54213; when that lands, drop "
-        "models/gemma4.py::register_aliased_scalars and its call site."
-    ),
-)
-def test_vllm_gemma4_self_decoder_registers_aliased_scalars():
-    """The aliased scalars must be buffers, so ``.to(device)`` moves them.
-
-    Source inspection rather than construction: ``Gemma4SelfDecoderLayers`` is a
-    ``support_torch_compile`` wrapper whose ``__init__`` wants a built parent
-    model, and what the fix changes is exactly these four assignments.
-    """
-    from spyre_inference.models.gemma4 import _ALIASED_SCALARS
-
-    gemma4 = pytest.importorskip("vllm.model_executor.models.gemma4")
-    src = inspect.getsource(gemma4.Gemma4SelfDecoderLayers.__init__)
-
-    plain = [
-        name
-        for name in _ALIASED_SCALARS
-        if not re.search(rf"""register_buffer\(\s*["']{name}["']""", src)
-    ]
-    assert not plain, f"still plain attributes upstream: {plain}"
-
-
-# ---------------------------------------------------------------------------
-# 13. Short-row matmul scheduling
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A 1-row matmul against a fused gate/up weight runs far below the rate the "
-        "same weight sustains with a full 8-row block, so padding the activation out "
-        "to the 8 PT rows is faster despite the extra rows. When this passes, drop "
-        "custom_ops/linear.py::SpyrePaddedRowsLinearMethod and the `_PAD_ROWS` "
+        "A 1-row matmul against a fused gate/up weight is slower than the same weight "
+        "against a full 8-row block, so padding the activation out to the 8 PT rows "
+        "is faster despite the extra rows. When this XPASSes, re-measure decode and "
+        "drop custom_ops/linear.py::SpyrePaddedRowsLinearMethod and the `_PAD_ROWS` "
         "constants it reads. Tracked by torch-spyre#4032."
     ),
 )
@@ -1035,101 +1213,46 @@ def test_spyre_one_row_matmul_not_slower_than_full_row_block(spyre_device):
         best_of(rows, reps=3)
     one_row, full_block = best_of(1), best_of(8)
 
-    # Run-to-run spread is a few percent and the gap is far wider, so 10% is not noise.
-    assert one_row <= 1.10 * full_block, (
+    # Padding stops paying off exactly when 1 row is no slower than the 8 rows it pads to.
+    assert one_row <= full_block, (
         f"1 row {one_row * 1e3:.2f} ms vs 8 rows {full_block * 1e3:.2f} ms "
         f"({100 * (one_row / full_block - 1):.0f}% slower)"
     )
 
 
 # ---------------------------------------------------------------------------
-# 14. Compiled Pixtral vision attention (coarse-tile hint split)
+# 13. Eager GemmaRMSNorm
 # ---------------------------------------------------------------------------
 
 
-_VISION_ATTN_COMPILE_REASON = (
-    "torch.compile of Pixtral vision Attention (RoPE + padded SDPA) dies in "
-    "coarse-tile: `hint_id=N appears in both group 0 and group 1` — ops from "
-    "the same spyre_hint were split across two loop nests. That is why "
-    "`_is_decoder_attention_like` refuses vision towers. When this XPASS-es, "
-    "vision blocks can compile and the decoder-only restriction can be dropped."
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "torch-spyre#2971: eager GemmaRMSNorm cannot multiply its staggered-EA "
+        "FP32 activation by a STANDARD [hidden] FP32 weight. When this XPASS-es, "
+        "remove force=True from SpyreGemmaRMSNorm."
+    ),
 )
+def test_spyre_eager_gemma_rms_norm(spyre_device):
+    """Upstream FP32 GemmaRMSNorm should run without a surrounding compiled graph."""
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 
+    torch.manual_seed(0)
+    x = torch.randn(4, 256, dtype=torch.float16)
+    weight = torch.randn(256, dtype=torch.float16)
+    norm = GemmaRMSNorm(256, eps=1e-6).to(torch.float16)
+    norm.weight.data.copy_(weight)
 
-@pytest.mark.xfail(strict=True, reason=_VISION_ATTN_COMPILE_REASON)
-def test_spyre_compiled_pixtral_vision_attention_coarse_tile(spyre_device, tp_group, monkeypatch):
-    """A compiled vision-attention block must match the eager patched forward.
+    x_device = x.to(spyre_device)
+    norm.to(spyre_device)
 
-    `_compile_blocks` wraps each TransformerBlock the same way. First
-    ``embed_multimodal`` then traces that graph and coarse-tile raises.
-    """
-    pixtral = pytest.importorskip("vllm.model_executor.models.pixtral")
-    from vllm.model_executor.layers.linear import LinearBase
+    # Bypass the Spyre OOT wrapper: this probe asks whether torch-spyre can lower
+    # the unchanged upstream implementation eagerly, not whether the workaround works.
+    actual = GemmaRMSNorm.forward_native(norm, x_device).cpu().float()
 
-    from spyre_inference.multimodal.pixtral import (
-        patch_vision_attention,
-        patch_vision_rope_vit,
-    )
-
-    monkeypatch.setattr(pixtral, "apply_rotary_emb_vit", pixtral.apply_rotary_emb_vit)
-    monkeypatch.setattr(
-        pixtral.VisionTransformer,
-        "freqs_cis",
-        pixtral.VisionTransformer.__dict__["freqs_cis"],
-    )
-    monkeypatch.setattr(pixtral.Attention, "forward", pixtral.Attention.forward)
-
-    hidden, heads, num_patches, max_side = 256, 4, 64, 16
-    args = pixtral.VisionEncoderArgs(
-        hidden_size=hidden,
-        num_channels=3,
-        image_size=128,
-        patch_size=16,
-        intermediate_size=512,
-        num_hidden_layers=1,
-        num_attention_heads=heads,
-        rope_theta=10000.0,
-        image_token_id=10,
-        spatial_merge_size=1,
-    )
-
-    class _FreqsStub:
-        def __init__(self):
-            self.args = args
-            self.max_patches_per_side = max_side
-            self._freqs_cis = None
-            self.device = torch.device("cpu")
-
-    layer = pixtral.Attention(args, disable_tp=True).to(torch.float16)
-    torch.manual_seed(31)
-    for param in layer.parameters():
-        param.data.normal_(std=0.02)
-    for module in layer.modules():
-        if isinstance(module, LinearBase):
-            module.quant_method.process_weights_after_loading(module)
-
-    patch_vision_rope_vit()
-    patch_vision_attention()
-
-    torch.manual_seed(7)
-    positions = torch.stack(
-        [
-            torch.randint(0, max_side, (num_patches,), dtype=torch.int64),
-            torch.randint(0, max_side, (num_patches,), dtype=torch.int64),
-        ],
-        dim=-1,
-    )
-    freqs_cis = pixtral.VisionTransformer.__dict__["freqs_cis"].fget(_FreqsStub())[
-        (positions[:, 0], positions[:, 1])
-    ]
-    torch.manual_seed(37)
-    x = torch.randn(1, num_patches, hidden, dtype=torch.float16)
-    mask = torch.ones(num_patches, num_patches, dtype=torch.bool).tril()
-
-    expected = pixtral.Attention.forward(layer, x, mask, freqs_cis)
-
-    layer = layer.to(spyre_device)
-    layer.compile(backend="inductor", fullgraph=True, dynamic=False)
-    out = layer(x.to(spyre_device), mask, freqs_cis.to(spyre_device))
-
-    torch.testing.assert_close(out.cpu().float(), expected.float(), atol=2e-2, rtol=2e-2)
+    x_fp32 = x.float()
+    variance = x_fp32.pow(2).mean(dim=-1, keepdim=True)
+    expected = (
+        x_fp32 * torch.rsqrt(variance + norm.variance_epsilon) * (weight.float() + 1.0)
+    ).half()
+    torch.testing.assert_close(actual, expected.float(), atol=1e-2, rtol=2e-3)

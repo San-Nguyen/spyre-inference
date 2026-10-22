@@ -19,6 +19,9 @@ from __future__ import annotations
 import gc
 import os
 
+MAX_MODEL_LEN = 128
+MAX_NUM_SEQS = 2
+
 
 def generate(
     model: str,
@@ -26,6 +29,7 @@ def generate(
     enforce_eager: bool,
     compilation_config: dict | None = None,
     hf_overrides=None,
+    kv_cache_dtype: str = "auto",
 ) -> list[list[int]]:
     """Run vllm.LLM.generate and return per-prompt token-id lists.
 
@@ -41,8 +45,9 @@ def generate(
         tensor_parallel_size=tp,
         dtype="float16",
         enforce_eager=enforce_eager,
-        max_model_len=128,
-        max_num_seqs=2,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=MAX_NUM_SEQS,
+        kv_cache_dtype=kv_cache_dtype,
         **({"compilation_config": compilation_config} if compilation_config is not None else {}),
         **({"hf_overrides": hf_overrides} if hf_overrides is not None else {}),
     )
